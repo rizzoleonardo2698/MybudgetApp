@@ -406,21 +406,42 @@ async function compressAttachmentImage(file) {
   return { blob, name: `${file.name.replace(/\.[^.]+$/, '') || 'foto'}.jpg` };
 }
 
+function isPdfAttachment(file) {
+  return file.type === 'application/pdf'
+    || file.type === 'application/x-pdf'
+    || (['', 'application/octet-stream'].includes(file.type) && /\.pdf$/i.test(file.name));
+}
+
+function isSupportedAttachment(file) {
+  return isPdfAttachment(file) || file.type.startsWith('image/');
+}
+
+async function prepareTransactionAttachment(file) {
+  if (isPdfAttachment(file)) {
+    if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name}: il PDF supera 8 MB.`);
+    const header = await file.slice(0, 5).text();
+    if (!header.startsWith('%PDF-')) throw new Error(`${file.name}: il file non sembra un PDF valido.`);
+    return { blob: file, name: file.name, contentType: 'application/pdf', extension: 'pdf' };
+  }
+  const { blob, name } = await compressAttachmentImage(file);
+  return { blob, name, contentType: 'image/jpeg', extension: 'jpg' };
+}
+
 async function uploadTransactionAttachments(transaction, files) {
   const failures = [];
   for (const file of files) {
     let path = null;
     try {
-      const { blob, name } = await compressAttachmentImage(file);
-      path = `${transaction.budgetId}/${transaction.id}/${crypto.randomUUID()}.jpg`;
-      const { error: uploadError } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+      const { blob, name, contentType, extension } = await prepareTransactionAttachment(file);
+      path = `${transaction.budgetId}/${transaction.id}/${crypto.randomUUID()}.${extension}`;
+      const { error: uploadError } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(path, blob, { contentType, upsert: false });
       if (uploadError) throw uploadError;
       const { error: rowError } = await supabase.from('transaction_attachments').insert({
         transaction_id: transaction.id,
         budget_id: transaction.budgetId,
         object_path: path,
         file_name: name,
-        content_type: 'image/jpeg',
+        content_type: contentType,
         byte_size: blob.size,
         uploaded_by: state.sessionUserId,
       });
@@ -441,15 +462,18 @@ async function openTransactionAttachments(transactionId) {
   const attachments = state.attachments.filter((item) => item.transactionId === transactionId);
   if (!attachments.length) return showToast('Questo movimento non ha allegati.', 'info');
   const title = escapeHtml(transaction.description);
-  document.querySelector('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal attachment-viewer" role="dialog" aria-modal="true" aria-label="Allegati del movimento" data-stop-propagation><div class="modal-header"><div><span class="section-kicker">${date(transaction.date)} · ${euro(transaction.amount)}</span><h2>${title}</h2></div><button class="icon-button" data-action="close-modal" aria-label="Chiudi">×</button></div><div class="attachment-gallery"><div class="empty-state"><span>◌</span><strong>Caricamento immagini…</strong></div></div></section></div>`;
+  document.querySelector('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal attachment-viewer" role="dialog" aria-modal="true" aria-label="Allegati del movimento" data-stop-propagation><div class="modal-header"><div><span class="section-kicker">${date(transaction.date)} · ${euro(transaction.amount)}</span><h2>${title}</h2></div><button class="icon-button" data-action="close-modal" aria-label="Chiudi">×</button></div><div class="attachment-gallery"><div class="empty-state"><span>◌</span><strong>Caricamento allegati…</strong></div></div></section></div>`;
   const gallery = document.querySelector('.attachment-gallery');
-  const images = await Promise.all(attachments.map(async (attachment) => {
+  const previews = await Promise.all(attachments.map(async (attachment) => {
     const { data, error } = await supabase.storage.from(ATTACHMENT_BUCKET).download(attachment.path);
     if (error) return `<div class="attachment-error">${escapeHtml(attachment.name)} · Impossibile aprire il file</div>`;
     const url = URL.createObjectURL(data);
-    return `<figure class="attachment-preview"><img src="${url}" alt="${escapeHtml(attachment.name)}" /><figcaption>${escapeHtml(attachment.name)}</figcaption></figure>`;
+    const preview = attachment.contentType === 'application/pdf'
+      ? `<div class="attachment-pdf"><iframe src="${url}" title="Anteprima ${escapeHtml(attachment.name)}"></iframe><a href="${url}" download="${escapeHtml(attachment.name)}">Apri o scarica PDF</a></div>`
+      : `<img src="${url}" alt="${escapeHtml(attachment.name)}" />`;
+    return `<figure class="attachment-preview">${preview}<figcaption>${escapeHtml(attachment.name)}</figcaption></figure>`;
   }));
-  if (gallery?.isConnected) gallery.innerHTML = images.join('');
+  if (gallery?.isConnected) gallery.innerHTML = previews.join('');
 }
 
 function render() {
@@ -1048,33 +1072,58 @@ function openTransactionModal(transaction = null, options = {}) {
   const paymentMethods = paymentMethodsForBudget(budget.id);
   const selectedPaymentMethodId = options.selectedPaymentMethodId || formState?.paymentMethodId || defaultPaymentMethodForBudget(budget.id)?.id || '';
   const projectedHint = isProjectedOccurrence ? '<p class="modal-intro">La modifica riguarda solo questa occorrenza. La ricorrenza resterà invariata per le date successive.</p>' : '';
-  document.querySelector('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" data-stop-propagation><div class="modal-header"><div><span class="section-kicker">${isEditing ? 'Modifica' : 'Nuovo'}</span><h2 id="modal-title">${isEditing ? 'Modifica movimento' : 'Nuovo movimento'}</h2></div><button class="icon-button" data-action="close-modal" aria-label="Chiudi">×</button></div>${projectedHint}<form id="transaction-form" class="form-stack"><input type="hidden" name="id" value="${formState?.id || ''}" />${isProjectedOccurrence ? `<input type="hidden" name="projectedDate" value="${formState?.date || ''}" /><input type="hidden" name="projectedBudgetId" value="${formState?.budgetId || budget.id}" />` : ''}<div class="form-grid"><label>Tipo<div class="segmented-control"><label><input type="radio" name="type" value="uscita" ${!formState || formState.type === 'uscita' ? 'checked' : ''} /><span>Uscita</span></label><label><input type="radio" name="type" value="entrata" ${formState?.type === 'entrata' ? 'checked' : ''} /><span>Entrata</span></label></div></label><label>Importo<input name="amount" type="number" min="0.01" step="0.01" placeholder="0,00" value="${formState?.amount || ''}" required /></label></div><div class="form-grid"><label>Data<input name="date" type="date" value="${formState?.date || APP_TODAY}" required ${isProjectedOccurrence ? 'disabled' : ''} /></label><label>Budget<select name="budgetId" ${isProjectedOccurrence ? 'disabled' : ''}>${state.budgets.map((item) => `<option value="${item.id}" ${item.id === (formState?.budgetId || budget.id) ? 'selected' : ''}>${item.name}</option>`).join('')}</select></label></div><div class="form-grid"><label>Categoria<select name="categoryId" required><option value="" disabled ${selectedCategoryId ? '' : 'selected'}>— Seleziona una categoria —</option>${categories.map((category) => `<option value="${category.id}" ${category.id === selectedCategoryId ? 'selected' : ''}>${category.icon} ${category.name}</option>`).join('')}<option value="new">＋ Crea categoria</option></select></label><label>Metodo / conto<select name="paymentMethodId" required><option value="" disabled ${selectedPaymentMethodId ? '' : 'selected'}>— Seleziona un metodo —</option>${paymentMethods.map((method) => `<option value="${method.id}" ${method.id === selectedPaymentMethodId ? 'selected' : ''}>${escapeHtml(method.name)}</option>`).join('')}<option value="new">＋ Crea metodo o conto</option></select></label></div><label>Descrizione<input name="description" placeholder="Es. Spesa settimanale" value="${formState?.description || ''}" required /></label><section class="attachment-upload-field ${attachmentsAllowed ? '' : 'hidden'}" data-attachment-upload><div><strong>Foto dello scontrino o della fattura</strong><small>Le immagini vengono compresse prima del caricamento. Massimo ${MAX_TRANSACTION_ATTACHMENTS} foto.</small></div><label class="attachment-file-picker"><span>📷 Scegli o scatta foto</span><input name="attachments" type="file" accept="image/*" capture="environment" multiple ${isProjectedOccurrence ? 'disabled' : ''} /></label><p class="attachment-selection" data-attachment-selection>Nessuna foto selezionata</p></section><label class="switch-line"><span><strong>Movimento ricorrente</strong><small>Genera automaticamente le prossime occorrenze</small></span><input name="recurring" type="checkbox" ${recurringEnabled ? 'checked' : ''} /><i></i></label><div class="recurring-fields ${recurringEnabled ? '' : 'hidden'}"><div class="form-grid"><label>Frequenza<select name="frequency"><option value="mensile" ${recurringFrequency === 'mensile' ? 'selected' : ''}>Mensile</option><option value="annuale" ${recurringFrequency === 'annuale' ? 'selected' : ''}>Annuale</option></select></label><label>Giorno<input name="day" type="number" min="1" max="31" value="${recurringDay}" /></label><label>Data fine (massimo 12 mesi)<input name="endDate" type="date" min="${recurringStartDate}" max="${maxRecurringEndDate(recurringStartDate)}" value="${recurringEndDate}" /><small class="field-hint">La durata massima è di 12 mesi dalla data di inizio.</small><span class="field-error hidden" data-recurring-end-error>La data fine deve rientrare nei 12 mesi dalla data di inizio.</span></label></div></div><div class="modal-actions"><button type="button" class="button button-soft" data-action="close-modal">Annulla</button><button type="button" data-action="submit-transaction" class="button button-primary">${isEditing ? 'Salva modifiche' : 'Aggiungi movimento'} <span>→</span></button></div></form></section></div>`;
+  document.querySelector('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" data-stop-propagation><div class="modal-header"><div><span class="section-kicker">${isEditing ? 'Modifica' : 'Nuovo'}</span><h2 id="modal-title">${isEditing ? 'Modifica movimento' : 'Nuovo movimento'}</h2></div><button class="icon-button" data-action="close-modal" aria-label="Chiudi">×</button></div>${projectedHint}<form id="transaction-form" class="form-stack"><input type="hidden" name="id" value="${formState?.id || ''}" />${isProjectedOccurrence ? `<input type="hidden" name="projectedDate" value="${formState?.date || ''}" /><input type="hidden" name="projectedBudgetId" value="${formState?.budgetId || budget.id}" />` : ''}<div class="form-grid"><label>Tipo<div class="segmented-control"><label><input type="radio" name="type" value="uscita" ${!formState || formState.type === 'uscita' ? 'checked' : ''} /><span>Uscita</span></label><label><input type="radio" name="type" value="entrata" ${formState?.type === 'entrata' ? 'checked' : ''} /><span>Entrata</span></label></div></label><label>Importo<input name="amount" type="number" min="0.01" step="0.01" placeholder="0,00" value="${formState?.amount || ''}" required /></label></div><div class="form-grid"><label>Data<input name="date" type="date" value="${formState?.date || APP_TODAY}" required ${isProjectedOccurrence ? 'disabled' : ''} /></label><label>Budget<select name="budgetId" ${isProjectedOccurrence ? 'disabled' : ''}>${state.budgets.map((item) => `<option value="${item.id}" ${item.id === (formState?.budgetId || budget.id) ? 'selected' : ''}>${item.name}</option>`).join('')}</select></label></div><div class="form-grid"><label>Categoria<select name="categoryId" required><option value="" disabled ${selectedCategoryId ? '' : 'selected'}>— Seleziona una categoria —</option>${categories.map((category) => `<option value="${category.id}" ${category.id === selectedCategoryId ? 'selected' : ''}>${category.icon} ${category.name}</option>`).join('')}<option value="new">＋ Crea categoria</option></select></label><label>Metodo / conto<select name="paymentMethodId" required><option value="" disabled ${selectedPaymentMethodId ? '' : 'selected'}>— Seleziona un metodo —</option>${paymentMethods.map((method) => `<option value="${method.id}" ${method.id === selectedPaymentMethodId ? 'selected' : ''}>${escapeHtml(method.name)}</option>`).join('')}<option value="new">＋ Crea metodo o conto</option></select></label></div><label>Descrizione<input name="description" placeholder="Es. Spesa settimanale" value="${formState?.description || ''}" required /></label><section class="attachment-upload-field ${attachmentsAllowed ? '' : 'hidden'}" data-attachment-upload><div><strong>Foto o documenti della spesa</strong><small>Le immagini vengono compresse; i PDF restano originali. Massimo ${MAX_TRANSACTION_ATTACHMENTS} allegati da 8 MB ciascuno.</small></div><label class="attachment-file-picker"><span>📷 Scegli o scatta foto</span><input name="attachments" type="file" accept="image/*" capture="environment" multiple ${isProjectedOccurrence ? 'disabled' : ''} /></label><label class="attachment-file-picker"><span>📎 Aggiungi fattura PDF</span><input name="pdfAttachments" type="file" accept="application/pdf,.pdf" multiple ${isProjectedOccurrence ? 'disabled' : ''} /></label><p class="attachment-selection" data-attachment-selection>Nessun allegato selezionato</p></section><label class="switch-line"><span><strong>Movimento ricorrente</strong><small>Genera automaticamente le prossime occorrenze</small></span><input name="recurring" type="checkbox" ${recurringEnabled ? 'checked' : ''} /><i></i></label><div class="recurring-fields ${recurringEnabled ? '' : 'hidden'}"><div class="form-grid"><label>Frequenza<select name="frequency"><option value="mensile" ${recurringFrequency === 'mensile' ? 'selected' : ''}>Mensile</option><option value="annuale" ${recurringFrequency === 'annuale' ? 'selected' : ''}>Annuale</option></select></label><label>Giorno<input name="day" type="number" min="1" max="31" value="${recurringDay}" /></label><label>Data fine (massimo 12 mesi)<input name="endDate" type="date" min="${recurringStartDate}" max="${maxRecurringEndDate(recurringStartDate)}" value="${recurringEndDate}" /><small class="field-hint">La durata massima è di 12 mesi dalla data di inizio.</small><span class="field-error hidden" data-recurring-end-error>La data fine deve rientrare nei 12 mesi dalla data di inizio.</span></label></div></div><div class="modal-actions"><button type="button" class="button button-soft" data-action="close-modal">Annulla</button><button type="button" data-action="submit-transaction" class="button button-primary">${isEditing ? 'Salva modifiche' : 'Aggiungi movimento'} <span>→</span></button></div></form></section></div>`;
   const incomeReceived = formState?.type === 'entrata' && formState.isReceived !== false;
   const descriptionField = document.querySelector('.modal input[name="description"]')?.closest('label');
   descriptionField?.insertAdjacentHTML('afterend', '<label class="switch-line income-status-field ' + (formState?.type === 'entrata' ? '' : 'hidden') + '"><span><strong>Incassata</strong><small>Seleziona quando il bonifico è arrivato</small></span><input name="isReceived" type="checkbox" ' + (incomeReceived ? 'checked' : '') + ' /><i></i></label>');
   const transactionForm = document.querySelector('#transaction-form');
   const attachmentCategoryInput = transactionForm?.querySelector('select[name="categoryId"]');
   const attachmentUploadField = transactionForm?.querySelector('[data-attachment-upload]');
-  const attachmentInput = transactionForm?.querySelector('input[name="attachments"]');
+  const attachmentInputs = [...(transactionForm?.querySelectorAll('input[name="attachments"], input[name="pdfAttachments"]') || [])];
   const attachmentSelection = transactionForm?.querySelector('[data-attachment-selection]');
+  const selectedAttachments = () => attachmentInputs.flatMap((input) => [...(input.files || [])]);
+  const updateAttachmentSelection = () => {
+    const files = selectedAttachments();
+    if (!attachmentSelection) return;
+    if (!files.length) {
+      attachmentSelection.textContent = 'Nessun allegato selezionato';
+      return;
+    }
+    const photos = files.filter((file) => !isPdfAttachment(file)).length;
+    const pdfs = files.length - photos;
+    attachmentSelection.textContent = `${files.length} allegati selezionati (${photos} ${photos === 1 ? 'foto' : 'foto'}, ${pdfs} PDF)`;
+  };
   const syncAttachmentField = () => {
     const allowed = Boolean(remoteMode && attachmentsFeatureAvailable && getCategory(attachmentCategoryInput?.value)?.allowAttachments);
     attachmentUploadField?.classList.toggle('hidden', !allowed);
-    if (!allowed && attachmentInput) {
-      attachmentInput.value = '';
-      if (attachmentSelection) attachmentSelection.textContent = 'Nessuna foto selezionata';
+    if (!allowed) {
+      attachmentInputs.forEach((input) => { input.value = ''; });
+      updateAttachmentSelection();
     }
   };
   attachmentCategoryInput?.addEventListener('change', syncAttachmentField);
-  attachmentInput?.addEventListener('change', () => {
-    const files = [...(attachmentInput.files || [])];
+  attachmentInputs.forEach((attachmentInput) => attachmentInput.addEventListener('change', () => {
+    const files = selectedAttachments();
     if (files.length > MAX_TRANSACTION_ATTACHMENTS) {
       attachmentInput.value = '';
-      if (attachmentSelection) attachmentSelection.textContent = `Puoi selezionare al massimo ${MAX_TRANSACTION_ATTACHMENTS} foto.`;
+      updateAttachmentSelection();
+      showToast(`Puoi selezionare al massimo ${MAX_TRANSACTION_ATTACHMENTS} allegati per movimento.`, 'error');
       return;
     }
-    if (attachmentSelection) attachmentSelection.textContent = files.length ? `${files.length} ${files.length === 1 ? 'foto selezionata' : 'foto selezionate'}` : 'Nessuna foto selezionata';
-  });
+    if (files.some((file) => !isSupportedAttachment(file))) {
+      attachmentInput.value = '';
+      updateAttachmentSelection();
+      showToast('Puoi allegare immagini o documenti PDF.', 'error');
+      return;
+    }
+    if (files.some((file) => isPdfAttachment(file) && file.size > MAX_ATTACHMENT_BYTES)) {
+      attachmentInput.value = '';
+      updateAttachmentSelection();
+      showToast('Ogni PDF può pesare al massimo 8 MB.', 'error');
+      return;
+    }
+    updateAttachmentSelection();
+  }));
   const recurringInput = transactionForm?.querySelector('input[name="recurring"]');
   const syncRecurringFields = () => transactionForm?.querySelector('.recurring-fields')?.classList.toggle('hidden', !recurringInput?.checked);
   const startDateInput = transactionForm?.querySelector('input[name="date"]');
@@ -1301,7 +1350,10 @@ async function handleSubmit(event) {
     const id = form.get('id');
     const existingTransaction = id ? state.transactions.find((transaction) => transaction.id === id) : null;
     const projectedTransaction = id ? recurringOccurrences().find((transaction) => transaction.id === id) : null;
-    const attachmentFiles = [...(formElement.querySelector('input[name="attachments"]')?.files || [])];
+    const attachmentFiles = [
+      ...(formElement.querySelector('input[name="attachments"]')?.files || []),
+      ...(formElement.querySelector('input[name="pdfAttachments"]')?.files || []),
+    ];
     const type = form.get('type');
     const recurringEnabled = form.get('recurring') === 'on';
     const frequency = form.get('frequency') || 'mensile';
@@ -1317,8 +1369,13 @@ async function handleSubmit(event) {
       is_received: type === 'entrata' ? form.get('isReceived') === 'on' : true,
     };
     if (!payload.category_id) return showToast('Seleziona una categoria oppure creane una nuova dal menu Categoria.', 'error');
-    if (attachmentFiles.length > MAX_TRANSACTION_ATTACHMENTS) return showToast(`Puoi allegare al massimo ${MAX_TRANSACTION_ATTACHMENTS} foto per movimento.`, 'error');
-    if (attachmentFiles.length && (!remoteMode || !getCategory(payload.category_id)?.allowAttachments)) return showToast('Attiva gli allegati nella categoria selezionata prima di aggiungere una foto.', 'error');
+    if (attachmentFiles.length > MAX_TRANSACTION_ATTACHMENTS) return showToast(`Puoi allegare al massimo ${MAX_TRANSACTION_ATTACHMENTS} file per movimento.`, 'error');
+    if (attachmentFiles.some((file) => !isSupportedAttachment(file))) return showToast('Puoi allegare immagini o documenti PDF.', 'error');
+    if (attachmentFiles.some((file) => isPdfAttachment(file) && file.size > MAX_ATTACHMENT_BYTES)) return showToast('Ogni PDF può pesare al massimo 8 MB.', 'error');
+    for (const file of attachmentFiles.filter(isPdfAttachment)) {
+      if (!(await file.slice(0, 5).text()).startsWith('%PDF-')) return showToast(`${file.name}: il file non sembra un PDF valido.`, 'error');
+    }
+    if (attachmentFiles.length && (!remoteMode || !getCategory(payload.category_id)?.allowAttachments)) return showToast('Attiva gli allegati nella categoria selezionata prima di aggiungere un file.', 'error');
     if (!payload.payment_method_id) return showToast('Seleziona un metodo/conto oppure lascia “Non specificato”.', 'error');
     const selectedPaymentMethod = getPaymentMethod(payload.payment_method_id);
     if (!selectedPaymentMethod || selectedPaymentMethod.budgetId !== payload.budget_id || selectedPaymentMethod.archived) return showToast('Il metodo/conto selezionato non è disponibile per questo budget.', 'error');
@@ -1399,7 +1456,7 @@ async function handleSubmit(event) {
     document.querySelector('#modal-root').innerHTML = '';
     render();
     showToast(attachmentFailures.length
-      ? `${id ? 'Movimento aggiornato' : 'Movimento aggiunto'}, ma ${attachmentFailures.length} foto non ${attachmentFailures.length === 1 ? 'è stata caricata' : 'sono state caricate'}. ${attachmentFailures[0]}`
+      ? `${id ? 'Movimento aggiornato' : 'Movimento aggiunto'}, ma ${attachmentFailures.length} allegati non ${attachmentFailures.length === 1 ? 'è stato caricato' : 'sono stati caricati'}. ${attachmentFailures[0]}`
       : (id ? 'Movimento aggiornato.' : 'Movimento aggiunto.'), attachmentFailures.length ? 'error' : 'success');
   }
   if (formId === 'payment-method-form') {

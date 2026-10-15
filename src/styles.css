@@ -1893,6 +1893,8 @@ h3 {
 .attachment-gallery { display: grid; gap: 1rem; grid-template-columns: 1fr; }
 .attachment-preview { background: #f5f3ef; border-radius: 10px; margin: 0; overflow: hidden; }
 .attachment-preview img { display: block; max-height: 65vh; object-fit: contain; width: 100%; }
+.attachment-pdf iframe { background: #fff; border: 0; display: block; height: min(65vh, 680px); width: 100%; }
+.attachment-pdf a { color: var(--coral-dark); display: inline-flex; font-size: .68rem; font-weight: 700; padding: .65rem .75rem; }
 .attachment-preview figcaption { color: var(--muted); font-size: .65rem; overflow-wrap: anywhere; padding: .6rem .75rem; }
 .attachment-error { background: #fff3e2; border-radius: 8px; color: #936622; font-size: .7rem; padding: .75rem; }
 @media (min-width: 700px) { .attachment-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

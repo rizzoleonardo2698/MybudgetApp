@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.vercel/
+Budget Mensile Personale 2026.xlsx
+Prompt Inizale.rtf
+DOCUMENTAZIONE_PROGETTO_MYBUDGET.md
+to do.txt
+Template Import Massivo MyBudget*.xlsx
+Template Import Massivo MyBudget*.preview.png
+Template Import Massivo MyBudget*.inspect.ndjson
